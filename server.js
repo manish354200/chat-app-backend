@@ -3,44 +3,70 @@ import OpenAI from "openai";
 import dotenv from "dotenv";
 import { fileURLToPath } from "node:url";
 
-dotenv.config({
-  path: fileURLToPath(new URL(".env", import.meta.url)),
-});
+dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = Number(process.env.PORT) || 5000;
+const allowedOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "http://localhost:5173");
+  const requestOrigin = req.headers.origin;
+
+  if (!requestOrigin || requestOrigin === allowedOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  }
+
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
+    return requestOrigin && requestOrigin !== allowedOrigin
+      ? res.sendStatus(403)
+      : res.sendStatus(204);
   }
 
-  next();
+  if (requestOrigin && requestOrigin !== allowedOrigin) {
+    return res.status(403).json({ error: "Origin not allowed." });
+  }
+
+  return next();
 });
 
 app.use(express.json());
 
-const client = new OpenAI({
-  apiKey: process.env.OPENROUTER_API_KEY,
-  baseURL: "https://openrouter.ai/api/v1",
-});
+let client;
+
+function getClient() {
+  if (!process.env.OPENROUTER_API_KEY) {
+    return null;
+  }
+
+  if (!client) {
+    client = new OpenAI({
+      apiKey: process.env.OPENROUTER_API_KEY,
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+  }
+
+  return client;
+}
 
 app.post("/chat", async (req, res) => {
+  const { message } = req.body ?? {};
+
+  if (typeof message !== "string" || message.trim().length === 0) {
+    return res.status(400).json({ error: "Message is required." });
+  }
+
+  const openRouterClient = getClient();
+
+  if (!openRouterClient) {
+    return res.status(503).json({ error: "OPENROUTER_API_KEY is not configured." });
+  }
+
   try {
-    const { message } = req.body;
-
-    if (!message || !message.trim()) {
-      return res.status(400).json({
-        error: "Message is required.",
-      });
-    }
-
-    const response = await client.chat.completions.create({
-      model: "openai/gpt-4o-mini", // OpenRouter format
+    const response = await openRouterClient.chat.completions.create({
+      model: "openai/gpt-4o-mini",
       messages: [
         {
           role: "user",
@@ -49,15 +75,26 @@ app.post("/chat", async (req, res) => {
       ],
     });
 
-    res.json({
-      reply: response.choices[0].message.content,
-    });
-  } catch (err) {
-    console.error(err);
+    const reply = response?.choices?.[0]?.message?.content;
 
-    res.status(500).json({
-      error: err.message,
+    if (typeof reply !== "string" || reply.trim().length === 0) {
+      console.error("Malformed OpenRouter response", {
+        hasChoices: Array.isArray(response?.choices),
+        firstChoiceType: typeof response?.choices?.[0],
+      });
+      return res.status(502).json({ error: "Invalid response from chat provider." });
+    }
+
+    return res.json({ reply });
+  } catch (error) {
+    console.error("OpenRouter request failed", {
+      message: error?.message,
+      status: error?.status,
+      code: error?.code,
+      type: error?.type,
     });
+
+    return res.status(502).json({ error: "Unable to generate chat reply right now." });
   }
 });
 
@@ -65,51 +102,11 @@ app.get("/", (req, res) => {
   res.send("Backend is running");
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+export { app };
+export default app;
 
-// import express from "express";
-// import Anthropic from "@anthropic-ai/sdk";
-// import dotenv from "dotenv";
-// import cors from "cors";
-
-
-// dotenv.config({ path: new URL(".env", import.meta.url) });
-
-// const app = express();
-// const PORT = process.env.PORT || 5000;
-
-// app.use(cors({ origin: "http://localhost:5173" }));
-// app.use(express.json());
-
-// const client = process.env.ANTHROPIC_API_KEY
-//   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-//   : null;
-
-// app.post("/chat", async (req, res) => {
-//   try {
-//     const { message } = req.body;
-
-//     if (!client) {
-//       return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured." });
-//     }
-
-//     if (!message || !message.trim()) {
-//       return res.status(400).json({ error: "Message is required." });
-//     }
-
-//     const response = await client.messages.create({
-//       model: "claude-3-opus-20240229", // or claude-3-sonnet, claude-3-haiku
-//       max_tokens: 500,
-//       messages: [{ role: "user", content: message }]
-//     });
-
-//     res.json({ reply: response.content[0].text });
-//   } catch (err) {
-//     console.error(err);
-//     res.status(500).json({ error: err.message });
-//   }
-// });
-
-// app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
